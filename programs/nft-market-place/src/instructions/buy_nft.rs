@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::{token::{TokenAccount, Token, self}, associated_token};
-
-use crate::{ SellerVault, NFTMatketPlaceProgramError};
+use anchor_lang::system_program;
+use crate::{SellerVault, NFTMatketPlaceProgramError};
 
 #[derive(Accounts)]
 #[instruction(
@@ -9,7 +9,7 @@ use crate::{ SellerVault, NFTMatketPlaceProgramError};
     first_creator: Pubkey,
     seller_vault_bump: u8
 )]
-pub struct UnlistNFT<'info> {
+pub struct BuyNFT<'info> {
     #[account(
         mut,
         seeds = [
@@ -23,50 +23,63 @@ pub struct UnlistNFT<'info> {
     pub seller_vault: Account<'info, SellerVault>,
     #[account(mut)]
     pub seller_vault_nft_token_account: Account<'info, TokenAccount>,
+    /// CHECK: This is not dangerous because we check seller == owner via instruction
     #[account(mut)]
-    pub seller: Signer<'info>,
+    pub seller: AccountInfo<'info>,
     #[account(mut)]
-    pub seller_nft_token_account: Account<'info, TokenAccount>,
+    pub buyer : Signer<'info>,
+    #[account(mut)]
+    pub buyer_nft_token_account: Account<'info, TokenAccount>,
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
 }
 
 pub fn handler(
-    ctx: Context<UnlistNFT>,
+    ctx: Context<BuyNFT>,
     mint_address: Pubkey,
     _first_creator: Pubkey,
-    _whitelist_collection_bump:u8,
+    _whitelist_collection_bump: u8,
     seller_vault_bump: u8
 ) -> Result<()> {
     let seller_vault = &mut ctx.accounts.seller_vault;
     let seller_vault_nft_token_account = &mut ctx.accounts.seller_vault_nft_token_account;
     let seller = &ctx.accounts.seller;
-    let seller_nft_token_account = &ctx.accounts.seller_nft_token_account;
-    
+    let buyer = &ctx.accounts.buyer;
+    let buyer_nft_token_account = &ctx.accounts.buyer_nft_token_account;
+
     if seller_vault.owner != seller.key() {
         msg!("invalid authority");
         return err!(NFTMatketPlaceProgramError::UndefinedError);
     }
-
-    let expected_seller_token_account = associated_token::get_associated_token_address(
-        &seller.key(), 
-        &mint_address
-    );
 
     let expected_seller_vault_token_account = associated_token::get_associated_token_address(
         &seller_vault.key(), 
         &mint_address
     );
 
-    if seller_nft_token_account.key() != expected_seller_token_account {
-        msg!("invalid seller_nft_token_account");
-        return  err!(NFTMatketPlaceProgramError::UndefinedError);
-    }
-
     if seller_vault_nft_token_account.key() != expected_seller_vault_token_account {
         msg!("invalid vault_nft_token_account");
         return  err!(NFTMatketPlaceProgramError::UndefinedError);
     }
+
+    let expected_buyer_nft_account = associated_token::get_associated_token_address(
+        &buyer.key(), 
+        &mint_address
+    );
+
+    if buyer_nft_token_account.key() != expected_buyer_nft_account {
+        msg!("invalid buyer_nft_token_account");
+        return  err!(NFTMatketPlaceProgramError::UndefinedError);
+    }
+
+    let cpi_context = CpiContext::new(
+        ctx.accounts.system_program.to_account_info(), 
+        system_program::Transfer {
+            from: buyer.to_account_info().clone(),
+            to: seller.clone()
+        });
+    
+    system_program::transfer(cpi_context, seller_vault.price)?;
 
     let seller_key = seller.key();
 
@@ -83,7 +96,7 @@ pub fn handler(
         ctx.accounts.token_program.to_account_info(),
         token::Transfer{
             from: seller_vault_nft_token_account.to_account_info(),
-            to: seller_nft_token_account.to_account_info(),
+            to: buyer_nft_token_account.to_account_info(),
             authority: seller_vault.to_account_info()
         },
         &seller_vault_signer
